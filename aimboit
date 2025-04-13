@@ -1,0 +1,570 @@
+--[[
+    SCRIPT HEADER AND UTILITY FUNCTIONS (Unchanged)
+--]]
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+-- Default Settings
+local dropHeight = 10; local frontOffset = 0; local spawnDelay = 0.01
+local predictionTime = 0.4; local predictionOffset = 1; local movementThreshold = 3; local usePrediction = true
+
+-- Global State Variables
+local running = false; local selectedPlayer = nil; local currentTargetData = nil; local spawnThread = nil
+local playerHistory = {} -- Store movement history: playerHistory[userId] = { {t, pos, vel}, ... }
+local HISTORY_SIZE = 5    -- Number of past states to store for smoothing
+local isSpectating = false
+local spectatedPlayer = nil
+
+-- Colors and Design (Keep Unchanged)
+local COLORS = { background=Color3.fromRGB(35,35,45), backgroundDark=Color3.fromRGB(25,25,35), accent=Color3.fromRGB(72,52,212), accentHover=Color3.fromRGB(87,67,227), stopButton=Color3.fromRGB(231,76,60), stopButtonHover=Color3.fromRGB(241,86,70), text=Color3.fromRGB(255,255,255), textDim=Color3.fromRGB(180,180,180), playerButton=Color3.fromRGB(45,45,60), playerButtonHover=Color3.fromRGB(55,55,70), selectedPlayer=Color3.fromRGB(72,52,212), inputBackground=Color3.fromRGB(50,50,65), border=Color3.fromRGB(55,55,70), checkboxBorder=Color3.fromRGB(80,80,95), checkboxChecked=Color3.fromRGB(72,52,212), checkboxUnchecked=Color3.fromRGB(45,45,60) }
+
+-- Utility Functions (Keep Unchanged)
+local function createRoundedFrame(parent, radius) local frame=Instance.new("Frame",parent);frame.BackgroundTransparency=1;local c=Instance.new("UICorner",frame);c.CornerRadius=UDim.new(0,radius or 8);return frame end
+local function createShadow(parent) local s=Instance.new("ImageLabel",parent);s.Name="Shadow";s.BackgroundTransparency=1;s.Position=UDim2.new(0,-15,0,-15);s.Size=UDim2.new(1,30,1,30);s.ZIndex=parent.ZIndex-1;s.Image="rbxassetid://6014261993";s.ImageColor3=Color3.fromRGB(0,0,0);s.ImageTransparency=0.6;s.ScaleType=Enum.ScaleType.Slice;s.SliceCenter=Rect.new(49,49,450,450);return s end
+local function createButton(parent, text, color, hoverColor, size) local b=Instance.new("TextButton",parent);b.Size=size or UDim2.new(1,0,0,36);b.Text=text;b.Font=Enum.Font.GothamSemibold;b.TextSize=14;b.TextColor3=COLORS.text;b.BackgroundColor3=color;b.AutoButtonColor=false;local c=Instance.new("UICorner",b);c.CornerRadius=UDim.new(0,6);local p=Instance.new("UIPadding",b);p.PaddingLeft=UDim.new(0,10);p.PaddingRight=UDim.new(0,10);b.MouseEnter:Connect(function()TweenService:Create(b,TweenInfo.new(0.2),{BackgroundColor3=hoverColor}):Play()end);b.MouseLeave:Connect(function()TweenService:Create(b,TweenInfo.new(0.2),{BackgroundColor3=color}):Play()end);return b end
+local function createTextBox(parent, placeholder, size) local ct=Instance.new("Frame",parent);ct.Size=size or UDim2.new(1,0,0,36);ct.BackgroundColor3=COLORS.inputBackground;ct.BorderSizePixel=0;local c=Instance.new("UICorner",ct);c.CornerRadius=UDim.new(0,6);local tb=Instance.new("TextBox",ct);tb.Size=UDim2.new(1,-20,1,0);tb.Position=UDim2.new(0,10,0,0);tb.BackgroundTransparency=1;tb.Font=Enum.Font.Gotham;tb.TextSize=14;tb.TextColor3=COLORS.text;tb.PlaceholderText=placeholder;tb.PlaceholderColor3=COLORS.textDim;tb.Text="";tb.TextXAlignment=Enum.TextXAlignment.Left;return tb,ct end
+local function createLabel(parent, text, textSize, padding) local l=Instance.new("TextLabel",parent);l.Size=UDim2.new(1,0,0,textSize+(padding or 10));l.BackgroundTransparency=1;l.Font=Enum.Font.GothamSemibold;l.TextSize=textSize or 14;l.TextColor3=COLORS.text;l.Text=text;l.TextXAlignment=Enum.TextXAlignment.Left;local p=Instance.new("UIPadding",l);p.PaddingLeft=UDim.new(0,10);return l end
+local function createSetting(parent, labelText, defaultValue) local ct=Instance.new("Frame",parent);ct.Size=UDim2.new(1,0,0,65);ct.BackgroundTransparency=1;local l=createLabel(ct,labelText,14);l.Position=UDim2.new(0,0,0,0);l.Size=UDim2.new(1,0,0,25);local tb,bc=createTextBox(ct,"Nhập giá trị...",UDim2.new(1,0,0,36));bc.Position=UDim2.new(0,0,0,29);tb.Text=tostring(defaultValue);return tb end
+
+-- === Hàm setCheckboxState với Tween (Đã bao gồm) ===
+local function setCheckboxState(checkbox, isChecked)
+    if not checkbox or not checkbox.Parent then return end
+
+    local targetColor = isChecked and COLORS.checkboxChecked or COLORS.checkboxUnchecked
+    local checkmark = checkbox:FindFirstChild("Checkmark")
+    local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+    TweenService:Create(checkbox, tweenInfo, { BackgroundColor3 = targetColor }):Play()
+
+    if isChecked then
+        if not checkmark then
+            checkmark = Instance.new("Frame", checkbox)
+            checkmark.Name = "Checkmark"
+            checkmark.Size = UDim2.fromScale(0.65, 0.65)
+            checkmark.Position = UDim2.fromScale(0.5, 0.5)
+            checkmark.AnchorPoint = Vector2.new(0.5, 0.5)
+            checkmark.BackgroundColor3 = COLORS.text
+            checkmark.BackgroundTransparency = 1
+            checkmark.BorderSizePixel = 0
+            local cmc = Instance.new("UICorner", checkmark)
+            cmc.CornerRadius = UDim.new(0, 3)
+        end
+        checkmark.Visible = true
+        TweenService:Create(checkmark, tweenInfo, { BackgroundTransparency = 0 }):Play()
+    else
+        if checkmark then
+            local fadeOutTween = TweenService:Create(checkmark, tweenInfo, { BackgroundTransparency = 1 })
+            fadeOutTween.Completed:Connect(function(state)
+                if state == Enum.TweenStatus.Completed and checkmark and checkmark.Parent then
+                    checkmark.Visible = false
+                end
+            end)
+            fadeOutTween:Play()
+        end
+    end
+end
+-- ==================================================
+
+local function setRowHighlight(button, isHighlighted)
+    if not button or not button.Parent then return end;
+    local targetColor = isHighlighted and COLORS.selectedPlayer or COLORS.playerButton;
+    local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    TweenService:Create(button, tweenInfo, { BackgroundColor3 = targetColor }):Play()
+end
+
+-- ================== HISTORY & SMOOTHING FUNCTIONS ==================
+local function updatePlayerHistory(userId, timestamp, position, velocity)
+    if not playerHistory[userId] then
+        playerHistory[userId] = {}
+    end
+    local history = playerHistory[userId]
+    table.insert(history, 1, {t = timestamp, pos = position, vel = velocity})
+    while #history > HISTORY_SIZE do
+        table.remove(history)
+    end
+end
+
+local function getSmoothedVelocity(userId)
+    local history = playerHistory[userId]
+    if not history or #history == 0 then
+        return Vector3.new()
+    end
+
+    local sumVel = Vector3.new()
+    local count = 0
+    for i = 1, math.min(#history, HISTORY_SIZE) do
+        sumVel = sumVel + history[i].vel
+        count = count + 1
+    end
+
+    if count > 0 then
+        return sumVel / count
+    else
+        return Vector3.new()
+    end
+end
+-- =====================================================================
+
+-- GUI Setup
+local function createPlayerListGUI()
+    local screenGui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+    screenGui.Name = "EnhancedVehicleGUI_v7_SmoothedPrediction_Adaptive_NegHeight" -- Cập nhật tên
+    screenGui.ResetOnSpawn = false; screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+    local mainFrame = createRoundedFrame(screenGui)
+    mainFrame.Name="MainFrame"
+    mainFrame.Position = UDim2.new(-1, 20, 0, 50)
+    TweenService:Create(mainFrame, TweenInfo.new(0.5, Enum.EasingStyle.Back), {
+        Position = UDim2.new(0, 20, 0, 50)
+    }):Play()
+    mainFrame.Size=UDim2.new(0,280,0,400);mainFrame.BackgroundTransparency=0;mainFrame.BackgroundColor3=COLORS.background;mainFrame.BorderSizePixel=0;mainFrame.ZIndex=10;mainFrame.Visible=true
+    createShadow(mainFrame)
+
+    -- Draggable Header (Keep Unchanged)
+    local isDragging=false;local dS;local sP;local header=Instance.new("Frame",mainFrame);header.Size=UDim2.new(1,0,0,40);header.BackgroundColor3=COLORS.backgroundDark;header.BorderSizePixel=0;header.ZIndex=11;local hc=Instance.new("UICorner",header);hc.CornerRadius=UDim.new(0,8);local hf=Instance.new("Frame",header);hf.Size=UDim2.new(1,0,0,10);hf.Position=UDim2.new(0,0,1,-10);hf.BackgroundColor3=COLORS.backgroundDark;hf.BorderSizePixel=0;hf.ZIndex=11;local title=Instance.new("TextLabel",header);title.Size=UDim2.new(1,-20,1,0);title.Position=UDim2.new(0,10,0,0);title.BackgroundTransparency=1;title.Font=Enum.Font.GothamBold;title.TextSize=16;title.TextColor3=COLORS.text;title.Text="🚗 Trình Quản Lý Xe (Dự đoán Thích ứng)";title.TextXAlignment=Enum.TextXAlignment.Left;title.ZIndex=12;header.InputBegan:Connect(function(i)if i.UserInputType==Enum.UserInputType.MouseButton1 then isDragging=true;dS=i.Position;sP=mainFrame.Position end end);header.InputEnded:Connect(function(i)if i.UserInputType==Enum.UserInputType.MouseButton1 then isDragging=false end end);UserInputService.InputChanged:Connect(function(i)if i.UserInputType==Enum.UserInputType.MouseMovement and isDragging then local d=i.Position-dS;mainFrame.Position=UDim2.new(sP.X.Scale,sP.X.Offset+d.X,sP.Y.Scale,sP.Y.Offset+d.Y)end end)
+
+    local content = Instance.new("Frame", mainFrame); content.Size=UDim2.new(1,-20,1,-60); content.Position=UDim2.new(0,10,0,50); content.BackgroundTransparency=1; content.ZIndex=11
+    local contentLayout = Instance.new("UIListLayout", content); contentLayout.SortOrder=Enum.SortOrder.LayoutOrder; contentLayout.Padding=UDim.new(0,10)
+    local searchBox, searchContainer = createTextBox(content, "🔍 Tìm người chơi..."); searchContainer.LayoutOrder=1
+    local buttonsContainer = Instance.new("Frame", content); buttonsContainer.Size=UDim2.new(1,0,0,36); buttonsContainer.BackgroundTransparency=1; buttonsContainer.LayoutOrder=2
+    local buttonsLayout = Instance.new("UIGridLayout", buttonsContainer); buttonsLayout.CellSize=UDim2.new(0.5,-5,0,36); buttonsLayout.CellPadding=UDim2.new(0,10,0,10); buttonsLayout.FillDirectionMaxCells=2
+    local refreshButton = createButton(buttonsContainer, "🔄 Làm mới", COLORS.accent, COLORS.accentHover)
+    local stopButton = createButton(buttonsContainer, "⛔ Dừng Tất Cả", COLORS.stopButton, COLORS.stopButtonHover)
+
+    local listContainer = Instance.new("Frame", content); listContainer.Size=UDim2.new(1,0,1,-136); listContainer.BackgroundTransparency=1; listContainer.LayoutOrder=3
+    local scrollFrame = Instance.new("ScrollingFrame", listContainer); scrollFrame.Size=UDim2.new(1,0,1,0); scrollFrame.BackgroundTransparency=1; scrollFrame.BorderSizePixel=0; scrollFrame.ScrollBarThickness=4; scrollFrame.ScrollBarImageColor3=COLORS.accent; scrollFrame.CanvasSize=UDim2.new(0,0,0,0)
+    local scrollLayout = Instance.new("UIListLayout", scrollFrame); scrollLayout.SortOrder=Enum.SortOrder.LayoutOrder; scrollLayout.Padding=UDim.new(0,6); scrollLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()if scrollFrame and scrollLayout then scrollFrame.CanvasSize = UDim2.new(0, 0, 0, scrollLayout.AbsoluteContentSize.Y) end end)
+
+    -- Advanced Settings Frame & Content
+    local advancedToggle = createButton(content, "⚙️ Tùy chọn nâng cao", COLORS.accent, COLORS.accentHover); advancedToggle.LayoutOrder = 4
+    local advancedFrame = Instance.new("Frame", content); advancedFrame.Size=UDim2.new(1,0,0,0); advancedFrame.BackgroundColor3=COLORS.backgroundDark; advancedFrame.BorderSizePixel=0; advancedFrame.ClipsDescendants=true; advancedFrame.LayoutOrder=5; local advC=Instance.new("UICorner",advancedFrame);advC.CornerRadius=UDim.new(0,8)
+    local advScrollingFrame = Instance.new("ScrollingFrame", advancedFrame); advScrollingFrame.Size=UDim2.new(1,-10,1,0); advScrollingFrame.Position=UDim2.new(0,5,0,0); advScrollingFrame.BackgroundTransparency=1; advScrollingFrame.BorderSizePixel=0; advScrollingFrame.ScrollBarThickness=4; advScrollingFrame.ScrollBarImageColor3=COLORS.accent; advScrollingFrame.CanvasSize=UDim2.new(0,0,0,0)
+    local advLayout = Instance.new("UIListLayout", advScrollingFrame); advLayout.SortOrder=Enum.SortOrder.LayoutOrder; advLayout.Padding=UDim.new(0,10); -- Đã sửa lỗi chính tả ở dòng dưới
+    advLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()if advScrollingFrame and advLayout then advScrollingFrame.CanvasSize=UDim2.new(0,0,0,advLayout.AbsoluteContentSize.Y)end end)
+
+    -- Settings
+    local heightBox = createSetting(advScrollingFrame, "🕥 Khoảng cách rơi (stud):", dropHeight)
+    local frontOffsetBox = createSetting(advScrollingFrame, "➡️ Khoảng cách trước (Khi TẮT Dự đoán):", frontOffset)
+    local delayBox = createSetting(advScrollingFrame, "⏱️ Delay spawn:", spawnDelay)
+    local predictTimeBox = createSetting(advScrollingFrame, "🧠 Thời gian dự đoán (s) [Gốc]:", predictionTime)
+    local predictOffsetBox = createSetting(advScrollingFrame, "➡️ Khoảng cách trước (Khi BẬT Dự đoán):", predictionOffset)
+    local thresholdBox = createSetting(advScrollingFrame, "📀 Ngưỡng tốc độ (Bật Dự đoán):", movementThreshold)
+    local rotXBox = createSetting(advScrollingFrame, "🔄 Rotation X (°):", 0); local rotYBox = createSetting(advScrollingFrame, "🔄 Rotation Y (°):", 0); local rotZBox = createSetting(advScrollingFrame, "🔄 Rotation Z (°):", 0)
+    local predictToggleContainer = Instance.new("Frame", advScrollingFrame); predictToggleContainer.Size = UDim2.new(1, 0, 0, 36); predictToggleContainer.BackgroundTransparency = 1; predictToggleContainer.LayoutOrder = 99
+    local predictToggle = createButton(predictToggleContainer, usePrediction and "🧠 Dự đoán vị trí: BẬT" or "🧠 Dự đoán vị trí: TẮT", usePrediction and COLORS.accent or COLORS.backgroundDark, usePrediction and COLORS.accentHover or COLORS.playerButtonHover)
+
+    -- Đã loại bỏ math.min ở dòng dưới
+    local isAdvancedOpen=false; local function calcAdvH()return advLayout and advLayout.AbsoluteContentSize.Y+20 or 0 end; advancedToggle.MouseButton1Click:Connect(function()isAdvancedOpen=not isAdvancedOpen;local tH=isAdvancedOpen and calcAdvH() or 0;TweenService:Create(advancedFrame,TweenInfo.new(0.3,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Size=UDim2.new(1,0,0,tH)}):Play();advancedToggle.Text=isAdvancedOpen and "⚙️ Đóng tùy chọn"or"⚙️ Tùy chọn nâng cao"end)
+    local predictToggleConnections={};local function updatePToggleHover()for _,c in pairs(predictToggleConnections)do c:Disconnect()end;table.clear(predictToggleConnections);local tc=usePrediction and COLORS.accent or COLORS.backgroundDark;local hc=usePrediction and COLORS.accentHover or COLORS.playerButtonHover;predictToggleConnections.e=predictToggle.MouseEnter:Connect(function()TweenService:Create(predictToggle,TweenInfo.new(0.2),{BackgroundColor3=hc}):Play()end);predictToggleConnections.l=predictToggle.MouseLeave:Connect(function()TweenService:Create(predictToggle,TweenInfo.new(0.2),{BackgroundColor3=tc}):Play()end)end;predictToggle.MouseButton1Click:Connect(function()usePrediction=not usePrediction;predictToggle.Text=usePrediction and"🧠 Dự đoán vị trí: BẬT"or"🧠 Dự đoán vị trí: TẮT";local tc=usePrediction and COLORS.accent or COLORS.backgroundDark;TweenService:Create(predictToggle,TweenInfo.new(0.2),{BackgroundColor3=tc}):Play();updatePToggleHover()end);updatePToggleHover()
+
+    -- Stop Button Logic (Keep Unchanged with spectator logic)
+    stopButton.MouseButton1Click:Connect(function()
+        if running or selectedPlayer or isSpectating then -- Thêm kiểm tra isSpectating
+            print("Stop All button clicked.")
+            local stoppedPlayerId = selectedPlayer and selectedPlayer.UserId
+            running = false
+            selectedPlayer = nil
+            -- Dừng theo dõi
+            if isSpectating then
+                isSpectating = false
+                spectatedPlayer = nil
+                game.Workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+                game.Workspace.CurrentCamera.CameraSubject = LocalPlayer.Character:FindFirstChild("Humanoid") or LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or LocalPlayer.Character:FindFirstChild("Head")
+                -- Không cần bỏ highlight ở đây vì không có selectedPlayer
+            end
+            if currentTargetData and currentTargetData.checkbox and currentTargetData.checkbox.Parent then
+                setCheckboxState(currentTargetData.checkbox, false)
+            end
+            if currentTargetData and currentTargetData.button and currentTargetData.button.Parent then
+                setRowHighlight(currentTargetData.button, false)
+            end
+            currentTargetData = nil
+            if stoppedPlayerId then
+                playerHistory[stoppedPlayerId] = nil
+            end
+            local oc=stopButton.BackgroundColor3; TweenService:Create(stopButton,TweenInfo.new(0.1),{BackgroundColor3=COLORS.text}):Play(); task.wait(0.1); TweenService:Create(stopButton,TweenInfo.new(0.1),{BackgroundColor3=oc}):Play()
+        end
+    end)
+
+    local playerRowData = {}
+
+    -- UPDATE LIST FUNCTION
+    function updateList()
+        local previouslySelectedPlayer = selectedPlayer
+        for _, data in pairs(playerRowData) do if data.button and data.button.Parent then data.button:Destroy() end end; table.clear(playerRowData)
+
+        local count = 0; local currentPlayers = Players:GetPlayers(); local searchLower = searchBox.Text:lower()
+        if not scrollFrame or not scrollFrame.Parent then warn("updateList: scrollFrame invalid!"); return end
+
+        for _, player in ipairs(currentPlayers) do
+            local nameLower = player.Name:lower()
+            if player ~= LocalPlayer and (searchLower == "" or nameLower:find(searchLower, 1, true)) then
+                count = count + 1; local data = { player = player }
+                local success, result = pcall(function()
+                    -- Row Frame
+                    local buttonFrame=Instance.new("Frame");buttonFrame.Name=player.Name;buttonFrame.Size=UDim2.new(1,0,0,40);buttonFrame.BackgroundColor3=COLORS.playerButton;buttonFrame.LayoutOrder=count;local c=Instance.new("UICorner",buttonFrame);c.CornerRadius=UDim.new(0,6)
+
+                    -- Checkbox (Đã bao gồm phiên bản đẹp hơn)
+                    local checkbox = Instance.new("TextButton")
+                    checkbox.Name = "Checkbox"
+                    checkbox.Size = UDim2.new(0, 20, 0, 20)
+                    checkbox.AnchorPoint = Vector2.new(1, 0.5)
+                    checkbox.Position = UDim2.new(1, -10, 0.5, 0)
+                    checkbox.Text = ""
+                    checkbox.BackgroundColor3 = COLORS.checkboxUnchecked
+                    checkbox.BorderSizePixel = 0
+                    local cbc = Instance.new("UICorner", checkbox)
+                    cbc.CornerRadius = UDim.new(0, 6)
+                    checkbox.Parent = buttonFrame
+
+                    -- Thêm nút Spectate ở đây
+                    local spectateButton = createButton(buttonFrame, "👁️", COLORS.playerButton, COLORS.playerButtonHover, UDim2.new(0, 30, 0, 30))
+                    spectateButton.AnchorPoint = Vector2.new(1, 0.5)
+                    spectateButton.Position = UDim2.new(1, -40, 0.5, 0) -- Đặt bên trái checkbox
+                    spectateButton.TextSize = 16
+
+                    -- Avatar & Name Label (Keep Unchanged)
+                    local avatar=Instance.new("ImageLabel",buttonFrame);avatar.Size=UDim2.new(0,30,0,30);avatar.Position=UDim2.new(0,5,0,5);avatar.BackgroundColor3=COLORS.backgroundDark;avatar.BorderSizePixel=0;local ac=Instance.new("UICorner",avatar);ac.CornerRadius=UDim.new(1,0)
+                    local nameLabel=Instance.new("TextLabel",buttonFrame);nameLabel.Size=UDim2.new(1,-70,1,0);nameLabel.Position=UDim2.new(0,40,0,0);nameLabel.BackgroundTransparency=1;nameLabel.Font=Enum.Font.GothamSemibold;nameLabel.TextSize=14;nameLabel.TextColor3=COLORS.text;nameLabel.Text=player.Name;nameLabel.TextXAlignment=Enum.TextXAlignment.Left
+
+                    buttonFrame.Parent = scrollFrame
+                    data.button=buttonFrame; data.checkbox=checkbox; table.insert(playerRowData, data)
+                    local uid=player.UserId;task.spawn(function()local s,r=pcall(function()return Players:GetUserThumbnailAsync(uid,Enum.ThumbnailType.HeadShot,Enum.ThumbnailSize.Size48x48)end);if s and avatar and avatar.Parent then avatar.Image=r end end)
+
+                    -- Checkbox Click Logic
+                    checkbox.MouseButton1Click:Connect(function()
+                        if selectedPlayer == player then
+                            running=false; local stoppedId=selectedPlayer.UserId; selectedPlayer=nil; currentTargetData=nil; if stoppedId and playerHistory[stoppedId] then playerHistory[stoppedId]=nil end; setCheckboxState(checkbox,false); setRowHighlight(buttonFrame,false)
+                            if isSpectating and spectatedPlayer == player then
+                                isSpectating = false
+                                spectatedPlayer = nil
+                                game.Workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+                                game.Workspace.CurrentCamera.CameraSubject = LocalPlayer.Character:FindFirstChild("Humanoid") or LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or LocalPlayer.Character:FindFirstChild("Head")
+                                setRowHighlight(buttonFrame, false) -- Có thể bạn muốn giữ highlight khi spectating
+                            else
+                                setCheckboxState(checkbox, false)
+                                setRowHighlight(buttonFrame, false)
+                                selectedPlayer = nil
+                                currentTargetData = nil
+                                if playerHistory[player.UserId] then playerHistory[player.UserId] = nil end
+                            end
+                        else
+                            local wasRunning=running; running=false; local oldTargetId=selectedPlayer and selectedPlayer.UserId;
+                            if currentTargetData and currentTargetData.checkbox and currentTargetData.checkbox.Parent then setCheckboxState(currentTargetData.checkbox,false) end
+                            if currentTargetData and currentTargetData.button and currentTargetData.button.Parent then setRowHighlight(currentTargetData.button,false) end
+                            if wasRunning then task.wait(0.1) end
+
+                            if oldTargetId and playerHistory[oldTargetId] then playerHistory[oldTargetId] = nil end
+                            selectedPlayer=player; currentTargetData=data;
+                            if not playerHistory[player.UserId] then playerHistory[player.UserId] = {} end
+
+                            setCheckboxState(checkbox,true); setRowHighlight(buttonFrame,true)
+
+                            -- Tắt spectator nếu đang theo dõi người chơi khác
+                            if isSpectating and spectatedPlayer ~= player then
+                                isSpectating = false
+                                spectatedPlayer = nil
+                                game.Workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+                                game.Workspace.CurrentCamera.CameraSubject = LocalPlayer.Character:FindFirstChild("Humanoid") or LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or LocalPlayer.Character:FindFirstChild("Head")
+                            end
+
+                            -- Read Settings (Cho phép dropHeight âm)
+                            local tempDH=tonumber(heightBox.Text);local tempFO=tonumber(frontOffsetBox.Text);local tempSD=tonumber(delayBox.Text);local tempPT=tonumber(predictTimeBox.Text);local tempPO=tonumber(predictOffsetBox.Text);local tempMT=tonumber(thresholdBox.Text);local tempRX=tonumber(rotXBox.Text);local tempRY=tonumber(rotYBox.Text);local tempRZ=tonumber(rotZBox.Text)
+
+                            -- === THAY ĐỔI Ở ĐÂY: Cho phép dropHeight âm ===
+                            dropHeight=(tempDH ~= nil) and tempDH or dropHeight; -- Chỉ kiểm tra có phải là số không
+                            -- ==========================================
+
+                            frontOffset=tempFO or frontOffset; spawnDelay=(tempSD and tempSD>0.001)and tempSD or spawnDelay;
+                            predictionTime=(tempPT and tempPT>=0)and tempPT or predictionTime;
+                            predictionOffset=tempPO or predictionOffset; movementThreshold=(tempMT and tempMT>=0)and tempMT or movementThreshold
+                            local rotX=math.rad(tempRX or 0);local rotY=math.rad(tempRY or 0);local rotZ=math.rad(tempRZ or 0)
+                            heightBox.Text=string.format("%.2f",dropHeight);frontOffsetBox.Text=string.format("%.2f",frontOffset);delayBox.Text=string.format("%.3f",spawnDelay);predictTimeBox.Text=string.format("%.2f",predictionTime);predictOffsetBox.Text=string.format("%.2f",predictionOffset);thresholdBox.Text=string.format("%.1f",math.deg(rotX));rotYBox.Text=string.format("%.1f",math.deg(rotY));rotZBox.Text=string.format("%.1f",math.deg(rotZ))
+
+                            -- Start ADVANCED spawning loop
+                            running = true
+                            local spawnFunc = task and task.spawn or spawn
+                            spawnThread = spawnFunc(function()
+                                local checkFails = 0
+                                print("Adaptive prediction loop started for:", selectedPlayer.Name)
+                                while running do
+                                    if selectedPlayer ~= player then print("Target changed, stopping loop for",player.Name); break end
+
+                                    local iterSuccess, iterErr = pcall(function()
+                                        local currentTarget=selectedPlayer; if not currentTarget or not currentTarget.UserId then running=false; return end
+                                        local userId = currentTarget.UserId
+                                        local char=currentTarget.Character; local hrp=char and char:FindFirstChild("HumanoidRootPart")
+
+                                        if not hrp then
+                                            checkFails=checkFails+1; if checkFails>2 then print(string.format("Target %s char/HRP missing. Stopping.",currentTarget.Name));running=false;if currentTargetData and currentTargetData.checkbox==checkbox and checkbox.Parent then setCheckboxState(checkbox,false);setRowHighlight(buttonFrame,false) end;if playerHistory[userId] then playerHistory[userId]=nil end;selectedPlayer=nil;currentTargetData=nil;return else print(string.format("Target %s char/HRP missing, waiting (Attempt %d)...",currentTarget.Name,checkFails)) end
+                                        else
+                                            -- Phần logic dự đoán thích ứng (đã bao gồm)
+                                            checkFails = 0
+                                            local currentTime = tick()
+                                            local currentPosition = hrp.Position
+                                            local currentVelocity = hrp.Velocity
+                                            updatePlayerHistory(userId, currentTime, currentPosition, currentVelocity)
+                                            local spawnPositionBase = currentPosition
+                                            local offsetVector = Vector3.new()
+                                            local currentPredictionTime = predictionTime
+                                            local history = playerHistory[userId]
+
+                                            if usePrediction and history and #history >= 3 then
+                                                local smoothedVelocity = getSmoothedVelocity(userId)
+                                                local speed = smoothedVelocity.Magnitude
+                                                local v_now = history[1].vel
+                                                local v_prev = history[2].vel
+                                                local mag_now = v_now.Magnitude
+                                                local mag_prev = v_prev.Magnitude
+                                                local minMagnitudeForAngleCalc = 0.5
+                                                local turningThresholdCosAngle = 0.95
+                                                local reducedPredictionTime = 0.1
+
+                                                if mag_now > minMagnitudeForAngleCalc and mag_prev > minMagnitudeForAngleCalc then
+                                                    local dotProduct = v_now:Dot(v_prev)
+                                                    local denominator = math.max(0.01, mag_now * mag_prev)
+                                                    local cosAngle = math.max(-1, math.min(1, dotProduct / denominator))
+                                                    if cosAngle < turningThresholdCosAngle then
+                                                        currentPredictionTime = reducedPredictionTime
+                                                    end
+                                                end
+
+                                                if speed > movementThreshold then
+                                                    spawnPositionBase = currentPosition + smoothedVelocity * currentPredictionTime
+                                                    local offsetDirection = (speed > 0.1 and smoothedVelocity.Unit or hrp.CFrame.LookVector)
+                                                    offsetVector = offsetDirection * predictionOffset
+                                                else
+                                                    if frontOffset ~= 0 then
+                                                        offsetVector = hrp.CFrame.LookVector * frontOffset
+                                                    end
+                                                end
+                                            elseif not usePrediction and frontOffset ~= 0 then
+                                                offsetVector = hrp.CFrame.LookVector * frontOffset
+                                            end
+
+                                            local spawnPosition = spawnPositionBase + Vector3.new(0, dropHeight, 0) + offsetVector -- dropHeight âm sẽ làm vị trí thấp hơn
+                                            local spawnCFrame = CFrame.new(spawnPosition) * CFrame.Angles(rotX, rotY, rotZ)
+
+                                            -- Fire RemoteEvent
+                                            local ef=ReplicatedStorage:FindFirstChild("Events");if ef then local rf=ef:FindFirstChild("Remotes");if rf then local se=rf:FindFirstChild("Spawn_Vehicle");if se and se:IsA("RemoteEvent") then se:FireServer(spawnCFrame,"Lift")else warn("Spawn RE invalid!");running=false end else warn("Remotes folder missing!");running=false end else warn("Events folder missing!");running=false end
+                                        end
+                                    end) -- End pcall iteration
+                                    if not iterSuccess then warn("Error in spawn loop iter:",iterErr); running=false end
+                                    local waitDuration = spawnDelay + (checkFails>0 and 0.4 or 0)
+                                    if running then task.wait(waitDuration) else break end
+                                end -- End while running
+                                print("Adaptive prediction loop finished for:", player.Name); spawnThread=nil
+                                if selectedPlayer ~= player and playerHistory[player.UserId] then
+                                    playerHistory[player.UserId] = nil
+                                end
+                            end) -- End spawnFunc
+                        end -- End selection logic
+                    end) -- End MouseButton1Click
+
+                    -- Spectate Button Click Logic (Đã sửa lỗi)
+                    spectateButton.MouseButton1Click:Connect(function()
+                        if isSpectating and spectatedPlayer == player then
+                            -- Dừng theo dõi
+                            isSpectating = false
+                            spectatedPlayer = nil
+                            game.Workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+                            game.Workspace.CurrentCamera.CameraSubject = LocalPlayer.Character:FindFirstChild("Humanoid") or LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or LocalPlayer.Character:FindFirstChild("Head")
+                            setRowHighlight(buttonFrame, false) -- Bỏ highlight khi dừng theo dõi
+                            if currentTargetData and currentTargetData.checkbox and currentTargetData.checkbox.Parent then
+                                setCheckboxState(currentTargetData.checkbox, false) -- Bỏ chọn checkbox khi dừng theo dõi
+                            end
+                            if playerHistory[player.UserId] then playerHistory[player.UserId] = nil end
+                        else
+                            -- Bắt đầu theo dõi
+                            isSpectating = true
+                            spectatedPlayer = player
+                            selectedPlayer = player -- Để giữ highlight
+                            currentTargetData = data -- Để có thể bỏ highlight nếu cần
+                            game.Workspace.CurrentCamera.CameraType = Enum.CameraType.Follow
+                            game.Workspace.CurrentCamera.CameraSubject = player.Character:FindFirstChild("HumanoidRootPart") or player.Character:FindFirstChild("Head")
+                            setRowHighlight(buttonFrame, true) -- Highlight khi đang theo dõi
+                        end
+                    end)
+
+                end) -- End pcall button creation
+                if not success then warn(string.format("Failed row for %s: %s", player.Name, tostring(result))) end
+            end -- End player filter
+        end -- End player loop
+
+        -- Restore visual state
+        if previouslySelectedPlayer then
+            local foundData=nil;
+            for _,data in ipairs(playerRowData)do
+                if data.player==previouslySelectedPlayer then foundData=data;break end
+            end;
+            if foundData then
+                print("Restoring state for",previouslySelectedPlayer.Name);
+                selectedPlayer=previouslySelectedPlayer;
+                currentTargetData=foundData;
+                if foundData.checkbox and foundData.checkbox.Parent then setCheckboxState(foundData.checkbox,true) end;
+                if foundData.button and foundData.button.Parent then setRowHighlight(foundData.button,true) end;
+                -- Khôi phục trạng thái spectator
+                if isSpectating and spectatedPlayer == previouslySelectedPlayer then
+                    game.Workspace.CurrentCamera.CameraType = Enum.CameraType.Follow
+                    game.Workspace.CurrentCamera.CameraSubject = previouslySelectedPlayer.Character:FindFirstChild("HumanoidRootPart") or previouslySelectedPlayer.Character:FindFirstChild("Head")
+                end
+            else
+                print("Prev selected",previouslySelectedPlayer.Name,"not found. Deselecting.");
+                if selectedPlayer==previouslySelectedPlayer then
+                    running=false;
+                    selectedPlayer=nil;
+                    currentTargetData=nil;
+                    if previouslySelectedPlayer.UserId and playerHistory[previouslySelectedPlayer.UserId] then
+                        playerHistory[previouslySelectedPlayer.UserId] = nil
+                    end
+                    -- Dừng theo dõi nếu người chơi không còn
+                    if isSpectating and spectatedPlayer == previouslySelectedPlayer then
+                        isSpectating = false
+                        spectatedPlayer = nil
+                        game.Workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+                        game.Workspace.CurrentCamera.CameraSubject = LocalPlayer.Character:FindFirstChild("Humanoid") or LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or LocalPlayer.Character:FindFirstChild("Head")
+                    end
+                end
+            end
+        end
+
+        task.wait(); if scrollFrame and scrollFrame.Parent then scrollFrame.CanvasSize=UDim2.new(0,0,0,scrollLayout.AbsoluteContentSize.Y) end
+    end -- *** End of updateList function definition ***
+
+    -- Connect list updating (Keep Unchanged)
+    refreshButton.MouseButton1Click:Connect(updateList)
+    searchBox:GetPropertyChangedSignal("Text"):Connect(updateList)
+    -- Initial list update (Keep Unchanged)
+    updateList()
+    -- Auto-refresh the list periodically (Keep Unchanged)
+    local autoRefreshThread = task.spawn(function()
+        while true do
+            local wt = 5;
+            if not screenGui or not screenGui.Parent or not screenGui.Parent:IsA("PlayerGui") then print("GUI removed, stopping auto-refresh."); break end;
+            if updateList then
+                local s, e = pcall(updateList);
+                if not s then warn("Error during auto-refresh:", e) end
+            end;
+            task.wait(wt)
+        end
+    end)
+    -- Cleanup function (Keep Unchanged)
+       screenGui.Destroying:Connect(function()
+        running = false
+        isSpectating = false
+        selectedPlayer = nil
+        spectatedPlayer = nil
+        if spawnThread then
+            spawnThread:Cancel()
+            spawnThread = nil
+        end
+    end)
+end
+
+-- Create intro GUI
+local function showIntro()
+    local introGui = Instance.new("ScreenGui")
+    introGui.Name = "IntroGui"
+    introGui.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+    
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 300, 0, 200)  -- Made taller for more text
+    frame.Position = UDim2.new(0.5, -150, 0.5, -100)
+    frame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    frame.BorderSizePixel = 0
+    frame.Parent = introGui
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = frame
+    
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 50)
+    title.Position = UDim2.new(0, 0, 0.1, 0)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 24
+    title.Text = "Vietnam Vina Script"
+    title.Parent = frame
+    
+    local credit = Instance.new("TextLabel")
+    credit.Size = UDim2.new(1, 0, 0, 30)
+    credit.Position = UDim2.new(0, 0, 0.35, 0)
+    credit.BackgroundTransparency = 1
+    credit.Font = Enum.Font.GothamSemibold
+    credit.TextColor3 = Color3.fromRGB(180, 180, 180)
+    credit.TextSize = 16
+    credit.Text = "Made by hido"
+    credit.Parent = frame
+    
+    local loadingText = Instance.new("TextLabel")
+    loadingText.Size = UDim2.new(1, 0, 0, 30)
+    loadingText.Position = UDim2.new(0, 0, 0.6, 0)
+    loadingText.BackgroundTransparency = 1
+    loadingText.Font = Enum.Font.GothamSemibold
+    loadingText.TextColor3 = Color3.fromRGB(180, 180, 180)
+    loadingText.TextSize = 14
+    loadingText.Text = "Loading..."
+    loadingText.Parent = frame
+    
+    local thanksText = Instance.new("TextLabel")
+    thanksText.Size = UDim2.new(1, 0, 0, 30)
+    thanksText.Position = UDim2.new(0, 0, 0.8, 0)
+    thanksText.BackgroundTransparency = 1
+    thanksText.Font = Enum.Font.GothamSemibold
+    thanksText.TextColor3 = Color3.fromRGB(72, 52, 212)
+    thanksText.TextSize = 14
+    thanksText.Text = "Thank you for using this script!"
+    thanksText.Parent = frame
+    
+    -- Initial transparency
+    frame.BackgroundTransparency = 1
+    title.TextTransparency = 1
+    credit.TextTransparency = 1
+    loadingText.TextTransparency = 1
+    thanksText.TextTransparency = 1
+    
+    -- Animate in sequence
+    game:GetService("TweenService"):Create(frame, TweenInfo.new(0.5), {BackgroundTransparency = 0}):Play()
+    task.wait(0.5)
+    
+    game:GetService("TweenService"):Create(title, TweenInfo.new(0.5), {TextTransparency = 0}):Play()
+    task.wait(0.7)
+    
+    game:GetService("TweenService"):Create(credit, TweenInfo.new(0.5), {TextTransparency = 0}):Play()
+    task.wait(0.7)
+    
+    -- Loading messages sequence
+    loadingText.Text = "Loading GUI..."
+    game:GetService("TweenService"):Create(loadingText, TweenInfo.new(0.5), {TextTransparency = 0}):Play()
+    task.wait(1)
+    
+    loadingText.Text = "Loading Player Data..."
+    task.wait(1)
+    
+    loadingText.Text = "Initializing..."
+    task.wait(1)
+    
+    game:GetService("TweenService"):Create(thanksText, TweenInfo.new(0.5), {TextTransparency = 0}):Play()
+    task.wait(1)
+    
+    -- Fade out everything
+    game:GetService("TweenService"):Create(frame, TweenInfo.new(0.5), {BackgroundTransparency = 1}):Play()
+    game:GetService("TweenService"):Create(title, TweenInfo.new(0.5), {TextTransparency = 1}):Play()
+    game:GetService("TweenService"):Create(credit, TweenInfo.new(0.5), {TextTransparency = 1}):Play()
+    game:GetService("TweenService"):Create(loadingText, TweenInfo.new(0.5), {TextTransparency = 1}):Play()
+    game:GetService("TweenService"):Create(thanksText, TweenInfo.new(0.5), {TextTransparency = 1}):Play()
+    
+    task.wait(0.5)
+    introGui:Destroy()
+end
+
+-- Initial GUI creation with intro
+showIntro()
+task.wait(7) -- Wait for longer intro to finish
+createPlayerListGUI()
